@@ -149,6 +149,16 @@
         <label class="form-label">内容 <span class="req">*</span></label>
         <textarea class="form-control doc-content-textarea" id="docContent" placeholder="输入文档内容，支持换行…"></textarea>
       </div>
+      <div class="form-group">
+        <label class="form-label">图片（可选）</label>
+        <div class="img-upload-wrap">
+          <label class="btn btn-secondary img-file-label" for="imgFileInput">📁 选择图片</label>
+          <input type="file" id="imgFileInput" accept="image/*" class="img-file-input" />
+          <button class="btn btn-secondary" id="clearImgBtn" type="button">✕ 移除</button>
+        </div>
+        <div id="imgPreview" class="img-preview-wrap"></div>
+        <div class="img-hint">支持 JPG / PNG / GIF / WebP，建议 1 MB 以内；图片以 Base64 格式存储于本地</div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" data-close-modal="docModal">取消</button>
@@ -168,6 +178,7 @@
       <div class="detail-tag-wrap">
         <span class="doc-card-tag" id="detailTag"></span>
       </div>
+      <div id="detailImageWrap" class="detail-image-wrap"></div>
       <div class="detail-content" id="detailContent"></div>
       <div class="detail-meta" id="detailMeta"></div>
     </div>

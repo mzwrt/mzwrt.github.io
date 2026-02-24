@@ -5,6 +5,11 @@
    then replace PASSWORD_HASH below with the output.
 =================================================== */
 const AUTH_SESSION_KEY = 'helpdocs_auth';
+const AUTH_FAILS_KEY   = 'helpdocs_fails';
+const AUTH_LOCK_KEY    = 'helpdocs_lock';
+const MAX_ATTEMPTS     = 5;
+const LOCKOUT_MS       = 30_000; // 30 seconds
+
 // Default password: admin123
 const PASSWORD_HASH = '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9';
 
@@ -22,18 +27,51 @@ function isAuthenticated() {
   return sessionStorage.getItem(AUTH_SESSION_KEY) === 'ok';
 }
 
+function isLockedOut() {
+  const until = Number(sessionStorage.getItem(AUTH_LOCK_KEY) || 0);
+  return until > 0 && Date.now() < until;
+}
+
+function lockoutRemaining() {
+  return Math.ceil((Number(sessionStorage.getItem(AUTH_LOCK_KEY)) - Date.now()) / 1000);
+}
+
+function recordFailure() {
+  const fails = Number(sessionStorage.getItem(AUTH_FAILS_KEY) || 0) + 1;
+  if (fails >= MAX_ATTEMPTS) {
+    sessionStorage.setItem(AUTH_LOCK_KEY, String(Date.now() + LOCKOUT_MS));
+    sessionStorage.removeItem(AUTH_FAILS_KEY);
+  } else {
+    sessionStorage.setItem(AUTH_FAILS_KEY, String(fails));
+  }
+}
+
 async function attemptLogin() {
   const input = document.getElementById('loginPassword');
   const errorEl = document.getElementById('loginError');
+
+  if (isLockedOut()) {
+    errorEl.textContent = `尝试次数过多，请 ${lockoutRemaining()} 秒后重试`;
+    return;
+  }
+
   const pwd = input.value;
   if (!pwd) { errorEl.textContent = '请输入密码'; return; }
   const hash = await sha256(pwd);
   if (hash === PASSWORD_HASH) {
+    sessionStorage.removeItem(AUTH_FAILS_KEY);
+    sessionStorage.removeItem(AUTH_LOCK_KEY);
     sessionStorage.setItem(AUTH_SESSION_KEY, 'ok');
     document.getElementById('loginOverlay').style.display = 'none';
     render();
   } else {
-    errorEl.textContent = '密码错误，请重试';
+    recordFailure();
+    if (isLockedOut()) {
+      errorEl.textContent = `密码错误次数过多，请 ${lockoutRemaining()} 秒后重试`;
+    } else {
+      const fails = Number(sessionStorage.getItem(AUTH_FAILS_KEY) || 0);
+      errorEl.textContent = `密码错误，还可尝试 ${MAX_ATTEMPTS - fails} 次`;
+    }
     input.value = '';
     input.focus();
   }
@@ -49,10 +87,47 @@ function logout() {
 =================================================== */
 const STORE_KEY = 'helpdocs_v2';
 
+/** Validate and sanitize data loaded from localStorage. */
+function validateData(d) {
+  if (!d || typeof d !== 'object') return false;
+  if (!Array.isArray(d.categories) || !Array.isArray(d.docs)) return false;
+  // Sanitize categories: must be non-empty strings ≤ 50 chars
+  d.categories = d.categories
+    .filter(c => typeof c === 'string' && c.trim().length > 0)
+    .map(c => c.trim().slice(0, 50));
+  // Sanitize docs: require essential fields and cap sizes
+  d.docs = d.docs
+    .filter(doc =>
+      doc && typeof doc === 'object' &&
+      typeof doc.id === 'string' && doc.id.length > 0 &&
+      typeof doc.title === 'string' && doc.title.length > 0 &&
+      typeof doc.category === 'string' &&
+      typeof doc.content === 'string' &&
+      typeof doc.createdAt === 'string' &&
+      typeof doc.updatedAt === 'string'
+    )
+    .map(doc => ({
+      id:        doc.id.slice(0, 50),
+      title:     doc.title.slice(0, 200),
+      category:  doc.category.slice(0, 50),
+      content:   doc.content.slice(0, 100000),
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
+      // imageUrl must be a data: URL for an image or empty
+      imageUrl: (typeof doc.imageUrl === 'string' &&
+                 (doc.imageUrl === '' || doc.imageUrl.startsWith('data:image/')))
+                 ? doc.imageUrl : ''
+    }));
+  return true;
+}
+
 function loadData() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    return raw ? JSON.parse(raw) : getDefaultData();
+    if (!raw) return getDefaultData();
+    const parsed = JSON.parse(raw);
+    if (!validateData(parsed)) return getDefaultData();
+    return parsed;
   } catch { return getDefaultData(); }
 }
 
@@ -176,6 +251,18 @@ function renderDocs() {
         </div>
         ${doc.updatedAt !== doc.createdAt ? '<span>已编辑</span>' : ''}
       </div>`;
+    // Insert image via DOM API (avoids putting a URL in a template literal src attribute)
+    if (doc.imageUrl) {
+      const imgDiv = document.createElement('div');
+      imgDiv.className = 'doc-card-img';
+      const img = document.createElement('img');
+      img.src = doc.imageUrl;
+      img.alt = '';
+      img.loading = 'lazy';
+      imgDiv.appendChild(img);
+      const tagEl = card.querySelector('.doc-card-tag');
+      if (tagEl) tagEl.after(imgDiv);
+    }
     grid.appendChild(card);
   });
 
@@ -232,6 +319,51 @@ function saveCategory() {
 }
 
 /* ===================================================
+   IMAGE UPLOAD
+=================================================== */
+let pendingImageUrl = '';
+
+function handleImageFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    showToast('请选择图片文件', 'error');
+    return;
+  }
+  const MAX_BYTES = 1 * 1024 * 1024; // 1 MB
+  if (file.size > MAX_BYTES) {
+    showToast('图片大小不能超过 1 MB', 'error');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = e => {
+    const dataUrl = e.target.result;
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+      showToast('无效的图片格式', 'error');
+      return;
+    }
+    pendingImageUrl = dataUrl;
+    updateImagePreview(dataUrl);
+  };
+  reader.readAsDataURL(file);
+}
+
+function updateImagePreview(src) {
+  const preview = document.getElementById('imgPreview');
+  const clearBtn = document.getElementById('clearImgBtn');
+  preview.innerHTML = '';
+  if (src) {
+    const img = document.createElement('img');
+    img.src = src;
+    img.alt = '预览';
+    img.className = 'img-preview-img';
+    preview.appendChild(img);
+    clearBtn.style.display = '';
+  } else {
+    clearBtn.style.display = 'none';
+  }
+}
+
+/* ===================================================
    DOC MODAL — Add / Edit
 =================================================== */
 function openAddModal() {
@@ -239,6 +371,9 @@ function openAddModal() {
   document.getElementById('modalTitle').textContent = '新建文档';
   document.getElementById('docTitle').value = '';
   document.getElementById('docContent').value = '';
+  pendingImageUrl = '';
+  updateImagePreview('');
+  document.getElementById('imgFileInput').value = '';
   populateCategorySelect();
   openModal('docModal');
   setTimeout(() => document.getElementById('docTitle').focus(), 100);
@@ -251,6 +386,9 @@ function openEditModal(id) {
   document.getElementById('modalTitle').textContent = '编辑文档';
   document.getElementById('docTitle').value = doc.title;
   document.getElementById('docContent').value = doc.content;
+  pendingImageUrl = doc.imageUrl || '';
+  updateImagePreview(pendingImageUrl);
+  document.getElementById('imgFileInput').value = '';
   populateCategorySelect(doc.category);
   openModal('docModal');
   setTimeout(() => document.getElementById('docTitle').focus(), 100);
@@ -282,12 +420,14 @@ function saveDoc() {
       doc.title = title;
       doc.category = cat;
       doc.content = content;
+      doc.imageUrl = pendingImageUrl;
       doc.updatedAt = new Date().toISOString();
     }
     showToast('文档已更新', 'success');
   } else {
     appData.docs.push({
       id: uid(), title, category: cat, content,
+      imageUrl: pendingImageUrl,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
@@ -307,9 +447,30 @@ function openDetail(id) {
   document.getElementById('detailTitle').textContent = doc.title;
   document.getElementById('detailTag').textContent = '🗂 ' + doc.category;
   document.getElementById('detailContent').textContent = doc.content;
-  document.getElementById('detailMeta').innerHTML =
-    `<span>📅 创建：${formatDate(doc.createdAt)}</span>` +
-    (doc.updatedAt !== doc.createdAt ? `<span>✏️ 更新：${formatDate(doc.updatedAt)}</span>` : '');
+
+  // Build meta using DOM APIs (no innerHTML with user data)
+  const metaEl = document.getElementById('detailMeta');
+  metaEl.innerHTML = '';
+  const s1 = document.createElement('span');
+  s1.textContent = `📅 创建：${formatDate(doc.createdAt)}`;
+  metaEl.appendChild(s1);
+  if (doc.updatedAt !== doc.createdAt) {
+    const s2 = document.createElement('span');
+    s2.textContent = `✏️ 更新：${formatDate(doc.updatedAt)}`;
+    metaEl.appendChild(s2);
+  }
+
+  // Show image if present
+  const imgWrap = document.getElementById('detailImageWrap');
+  imgWrap.innerHTML = '';
+  if (doc.imageUrl) {
+    const img = document.createElement('img');
+    img.src = doc.imageUrl;
+    img.alt = doc.title;
+    img.className = 'detail-image';
+    imgWrap.appendChild(img);
+  }
+
   document.getElementById('detailEditBtn').onclick = () => {
     closeModal('detailModal');
     openEditModal(id);
@@ -445,6 +606,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // Modal save buttons
   document.getElementById('saveDocBtn').addEventListener('click', saveDoc);
   document.getElementById('saveCatBtn').addEventListener('click', saveCategory);
+
+  // Image upload
+  document.getElementById('imgFileInput').addEventListener('change', e => {
+    handleImageFile(e.target.files[0]);
+  });
+  document.getElementById('clearImgBtn').addEventListener('click', () => {
+    pendingImageUrl = '';
+    updateImagePreview('');
+    document.getElementById('imgFileInput').value = '';
+  });
 
   // Search
   document.getElementById('searchInput').addEventListener('input', e => handleSearch(e.target.value));
