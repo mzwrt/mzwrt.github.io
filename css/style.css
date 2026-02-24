@@ -829,8 +829,20 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   font-size: 12px;
   color: rgba(255,255,255,0.5);
 }
+.footer-bottom .container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
 .footer-bottom a { color: rgba(255,255,255,0.55); }
 .footer-bottom a:hover { color: var(--accent); }
+.beian-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.beian-item img { height: 14px; }
 
 /* =========================================
    PAGE INNER LAYOUT
